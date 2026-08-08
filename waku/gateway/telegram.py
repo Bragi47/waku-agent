@@ -20,10 +20,12 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import threading
 from pathlib import Path
 
 from waku.app import Waku
 from waku.gateway.cli import make_console_unicode_safe
+from waku.loop.agent import LoopResult
 
 make_console_unicode_safe()  # any unicode (→, ✓, emoji) must never kill a backgrounded bot
 
@@ -215,8 +217,23 @@ def _build_app(token: str, allowed: str = ""):
     from telegram import Update
     from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
-    waku = Waku()
+    from waku.config import load_settings
+
+    settings = load_settings()
+    settings.ensure_home()
+    from waku.db import connect
+
+    # respond() runs on worker threads (asyncio.to_thread) while PTB may invoke
+    # handlers concurrently, so the sqlite connection must be shareable across
+    # threads — and turns are serialized by the lock below so two messages can
+    # never write state.db at once.
+    waku = Waku(conn=connect(settings.home, check_same_thread=False))
     waku.session.session_id = "telegram"   # its own conversation thread in the inbox
+    _turn_lock = threading.Lock()
+
+    def respond(user_message: str) -> LoopResult:
+        with _turn_lock:
+            return waku.respond(user_message, observer=_observer, source="telegram")
 
     async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if allowed_ids and str(update.effective_user.id) not in allowed_ids:
@@ -225,8 +242,7 @@ def _build_app(token: str, allowed: str = ""):
         print(f"you › {update.message.text}")
         # respond() is seconds of LLM time — run it off the event loop or the
         # poller freezes with us and every incoming message queues behind us.
-        result = await asyncio.to_thread(waku.respond, update.message.text,
-                                         observer=_observer, source="telegram")
+        result = await asyncio.to_thread(respond, update.message.text)
         reply = _clean_surrogates(result.reply)
         print(f"waku › {reply}")
         await update.message.reply_text(reply or "(no reply)")
@@ -254,8 +270,7 @@ def _build_app(token: str, allowed: str = ""):
                 await update.message.reply_text("(didn't catch that — try again?)")
                 return
             print(f"you › {heard}")
-            result = await asyncio.to_thread(waku.respond, heard,
-                                             observer=_observer, source="telegram")
+            result = await asyncio.to_thread(respond, heard)
             text = _clean_surrogates(result.reply)
             print(f"waku › {text}")
             text = text or "(no reply)"
@@ -271,6 +286,9 @@ def _build_app(token: str, allowed: str = ""):
             wav = await asyncio.to_thread(_speech_wav, _speakable(text))
             await update.message.reply_voice(io.BytesIO(wav))
         except Exception as exc:  # BLE001: a voice hiccup must never kill the bot
+            import traceback
+
+            traceback.print_exc()
             print(f"(telegram) voice handling failed: {exc}")
             try:
                 await update.message.reply_text("(voice processing failed — try again?)")

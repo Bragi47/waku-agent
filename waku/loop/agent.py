@@ -17,6 +17,7 @@ End-loop guardrails (the orange box's exit conditions):
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -29,6 +30,24 @@ from waku.tools.registry import ToolRegistry
 # them — without either being wired into the loop's logic.
 LoopEvent = dict[str, Any]
 Observer = Callable[[str, LoopEvent], None]
+
+# Providers (free tiers especially) can emit lone surrogates (U+D800–U+DFFF)
+# inside tool-call arguments. sqlite rejects them at INSERT ("surrogates not
+# allowed") — the live bug that killed voice replies — and consoles mangle
+# them. arg scrub + boundary scrubs (app.respond, session.add_exchange) keep
+# the whole pipeline surrogate-free.
+_SURROGATES = re.compile("[\ud800-\udfff]")
+
+
+def _clean_obj(value: Any) -> Any:
+    """Deep-scrub strings in arbitrary tool arguments (dicts/lists/str)."""
+    if isinstance(value, str):
+        return _SURROGATES.sub("", value)
+    if isinstance(value, list):
+        return [_clean_obj(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _clean_obj(v) for k, v in value.items()}
+    return value
 
 
 @dataclass
@@ -100,8 +119,9 @@ def run_loop(
         # ---- act: execute each requested tool; observe: feed results back
         tool_results = []
         for call in tool_uses:
-            output = tools.execute(call.name, call.input, notify=notify)
-            event = {"tool": call.name, "args": call.input, "output": output}
+            args = _clean_obj(call.input)   # see _clean_obj — sqlite-safe args
+            output = tools.execute(call.name, args, notify=notify)
+            event = {"tool": call.name, "args": args, "output": output}
             result.tool_calls.append(event)
             notify("tool", event)
             tool_results.append(

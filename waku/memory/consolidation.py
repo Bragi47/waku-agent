@@ -12,12 +12,17 @@ A cheap model reads the unconsolidated chat log and produces:
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
 
 import anthropic
 
 from waku.memory.episodic.store import SqliteEpisodeStore
 from waku.memory.semantic.store import SqliteFactStore
+
+# LLM-distilled text can carry lone surrogates (same bug family as tool args);
+# sqlite INSERT rejects them. Scrub before persisting facts/episodes.
+_SURROGATES = re.compile("[\ud800-\udfff]")
 
 SUMMARIZER_PROMPT = """\
 You distill a personal assistant's recent conversation into long-term memory.
@@ -63,9 +68,11 @@ def consolidate_if_due(
 
     for fact in distilled.get("facts", []):
         if fact.get("subject") and fact.get("content"):
-            facts.add(fact["subject"], fact["content"], source="consolidation")
+            facts.add(_SURROGATES.sub("", fact["subject"]),
+                      _SURROGATES.sub("", fact["content"]), source="consolidation")
     if distilled.get("episode"):
-        episodes.add(distilled["episode"], happened_at=date.today().isoformat())
+        episodes.add(_SURROGATES.sub("", distilled["episode"]),
+                     happened_at=date.today().isoformat())
 
     conn.execute(
         f"UPDATE chat_log SET consolidated = 1 WHERE id IN ({','.join('?' * len(rows))})",
