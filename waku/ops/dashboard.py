@@ -243,6 +243,38 @@ def _get_notion_store():
     return _notion_store
 
 
+def _read_text(path: Path, default: str = "") -> str:
+    """Read a text file that may have been saved by a Windows tool in cp1251
+    (a redirected console writes dash/em-dash as bytes 0x95–0x97, which utf-8
+    chokes on). utf-8 first, then cp1251 — a changed encoding must render the
+    profile, not 500 the whole dashboard page."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return path.read_text(encoding="cp1251")
+    except (UnicodeDecodeError, OSError):
+        return default
+
+
+_soul_cache: tuple[float, str] | None = None
+
+
+def _soul_text(home: Path) -> str:
+    """SOUL.md for the page, cached briefly (collect() runs every few seconds
+    of auto-refresh; the file is tiny but stat+open×N tabs add up)."""
+    global _soul_cache
+    path = home / "SOUL.md"
+    if not path.exists():
+        return ""
+    if _soul_cache and time.time() - _soul_cache[0] < 30.0:
+        return _soul_cache[1]
+    text = _read_text(path)
+    _soul_cache = (time.time(), text)
+    return text
+
+
 def collect() -> dict:
     """Everything the page shows, in one JSON blob."""
     settings = load_settings()
@@ -452,7 +484,7 @@ def collect() -> dict:
         "episodes": episodes_data["items"],
         "episodes_source": episodes_data["source"],
         "episodes_error": episodes_data["error"],
-        "soul": (home / "SOUL.md").read_text(encoding="utf-8") if (home / "SOUL.md").exists() else "",
+        "soul": _soul_text(home),
         "chat_pending": conn.execute("SELECT COUNT(*) FROM chat_log WHERE consolidated=0").fetchone()[0],
         "chat_log": rows("SELECT role, content, consolidated, source, session_id, created_at FROM chat_log ORDER BY id DESC LIMIT 80")[::-1],
         "sessions": session_list(conn),
