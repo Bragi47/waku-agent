@@ -239,13 +239,28 @@ def _build_app(token: str, allowed: str = ""):
         if allowed_ids and str(update.effective_user.id) not in allowed_ids:
             await update.message.reply_text("This Waku serves someone else. Run your own!")
             return
-        print(f"you › {update.message.text}")
-        # respond() is seconds of LLM time — run it off the event loop or the
-        # poller freezes with us and every incoming message queues behind us.
-        result = await asyncio.to_thread(respond, update.message.text)
-        reply = _clean_surrogates(result.reply)
-        print(f"waku › {reply}")
-        await update.message.reply_text(reply or "(no reply)")
+        try:
+            # 'typing…' shows instantly so a multi-second LLM turn doesn't look
+            # like a dead bot (free tiers can take a minute per call).
+            from telegram.constants import ChatAction
+
+            await update.message.chat.send_action(ChatAction.TYPING)
+            print(f"you › {update.message.text}")
+            # respond() is seconds of LLM time — run it off the event loop or the
+            # poller freezes with us and every incoming message queues behind us.
+            result = await asyncio.to_thread(respond, update.message.text)
+            reply = _clean_surrogates(result.reply)
+            print(f"waku › {reply}")
+            await update.message.reply_text(reply or "(no reply)")
+        except Exception as exc:  # BLE001: a text hiccup must never kill the bot
+            import traceback
+
+            traceback.print_exc()
+            print(f"(telegram) text handling failed: {exc}")
+            try:
+                await update.message.reply_text("(processing failed — try again?)")
+            except Exception:
+                pass
 
     async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if allowed_ids and str(update.effective_user.id) not in allowed_ids:
@@ -365,7 +380,7 @@ def start_in_background() -> bool:
     def run() -> None:
         # keep PTB's own error logging out of the dashboard terminal; we report
         # the one error that matters (Conflict) cleanly via on_poll_error.
-        logging.getLogger("telegram").setLevel(logging.CRITICAL)
+        logging.getLogger("telegram").setLevel(logging.WARNING)
         logging.getLogger("httpx").setLevel(logging.WARNING)
         # its own event loop on this thread; start_polling is non-blocking, then
         # run_forever keeps it alive until the process (a daemon thread) exits.
