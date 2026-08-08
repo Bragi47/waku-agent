@@ -57,6 +57,11 @@ def _speakable(text: str) -> str:
 _whisper = None
 _whisper_lock = None
 _pipeline = None
+# kokoro-ru parts are cached once and reused across voice replies (module
+# singletons, like _pipeline for English). Building them per-message — RuG2P
+# (espeak data load) + a 1.1M-param KModel load + the voice-pack torch.load —
+# added ~2-4s to EVERY voice reply; measured on a fresh load with no cache.
+_ru = None
 _RU_DIR = Path(os.getenv("WAKU_RU_VOICE_DIR", "")) if os.getenv("WAKU_RU_VOICE_DIR") else None
 if _RU_DIR is None:
     home = os.getenv("WAKU_HOME", ".waku")
@@ -124,19 +129,29 @@ def _synth_en(text: str) -> list:
 
 def _synth_ru(text: str, voice: str = "sveta") -> list:
     """Route text -> kokoro-ru (ru_g2p -> KModel). Paths live in $WAKU_HOME/
-    kokoro-ru; create them by running scripts/setup_ru_voice.py."""
-    import sys
+    kokoro-ru; create them by running scripts/setup_ru_voice.py.
 
-    import torch
+    The three parts (g2p, model, voice pack) are built ONCE and cached in
+    `_ru` — loading them per message cost seconds on every voice reply."""
+    global _ru
+    import torch  # noqa: F401,F811  (local so a telegram-only install never pays torch)
+    if _ru is None:
+        import sys
 
-    # _RU_DIR is non-None here — the caller checked it before choosing this path.
-    sys.path.insert(0, str(_RU_DIR))
-    from kokoro import KModel  # noqa: E402
-    from ru_g2p import RuG2P  # noqa: E402
+        # _RU_DIR is non-None here — the caller checked it before choosing this path.
+        sys.path.insert(0, str(_RU_DIR))
+        from kokoro import KModel  # noqa: E402
+        from ru_g2p import RuG2P  # noqa: E402
 
-    g2p = RuG2P(espeak_data=str(_RU_DIR / "espeak-data"), vocab_path=str(_RU_DIR / "kokoro-config.json"))
-    model = KModel(model=str(_RU_DIR / "kokoro-ru-v2-base.pth")).eval()
-    pack = torch.load(str(_RU_DIR / f"voices/{voice}.pt"), map_location="cpu", weights_only=True)
+        g2p = RuG2P(espeak_data=str(_RU_DIR / "espeak-data"),
+                    vocab_path=str(_RU_DIR / "kokoro-config.json"))
+        model = KModel(model=str(_RU_DIR / "kokoro-ru-v2-base.pth")).eval()
+        _ru = (g2p, model, {})   # {voice name: loaded pack}
+    g2p, model, voices = _ru
+    if voice not in voices:
+        voices[voice] = torch.load(
+            str(_RU_DIR / f"voices/{voice}.pt"), map_location="cpu", weights_only=True)
+    pack = voices[voice]
     ipa, _ = g2p(text)
     with torch.no_grad():
         return [model(ipa, pack[len(ipa) - 1], 1.0, return_output=True).audio.numpy()]
@@ -156,6 +171,27 @@ def posture() -> str:
         return f"  reachable by: {len(ids)} allowlisted user(s)"
     return ("  reachable by: ANYONE who finds this bot — it will answer from your\n"
             "                personal memory. Set TELEGRAM_ALLOWED_USER to lock it.")
+
+
+def _warm_tts_and_stt() -> None:
+    """Load kokoro-ru + whisper in a background daemon thread at bot start, so
+    the FIRST voice reply isn't the cold one (20s of model loads). Runs only
+    when voice replies are on and the ru voice is installed; failures are
+    ignored — each piece also loads lazily on first use."""
+    import threading
+
+    def warm() -> None:
+        try:
+            if _RU_DIR is not None:
+                _synth_ru("Проверка связи.")
+        except Exception as exc:
+            print(f"(telegram) TTS warm-up skipped: {exc}")
+        try:
+            _get_whisper()
+        except Exception as exc:
+            print(f"(telegram) whisper warm-up skipped: {exc}")
+
+    threading.Thread(target=warm, daemon=True, name="tg-warmup").start()
 
 
 def _build_app(token: str, allowed: str = ""):
@@ -241,6 +277,8 @@ def main() -> None:
     token = load_settings().telegram_token
     if not token:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in .env (message @BotFather to create a bot).")
+    if os.getenv("WAKU_TG_VOICE", "0") == "1":
+        _warm_tts_and_stt()
     app = _build_app(token)
     print("Waku is listening on Telegram — message your bot. Ctrl-C to stop.")
     print(posture())
@@ -271,6 +309,8 @@ def start_in_background() -> bool:
 
     print("(telegram) starting:")
     print(posture())
+    if os.getenv("WAKU_TG_VOICE", "0") == "1":
+        _warm_tts_and_stt()
 
     import logging
 
