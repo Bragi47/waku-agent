@@ -11,7 +11,21 @@ away. What persists lives in waku/memory. Working memory =
 
 from __future__ import annotations
 
+import re
+
 from waku.config import Settings
+
+# Lone surrogates (U+D800–U+DFFF) can come out of whisper STT or a provider
+# echo; sqlite/httpx/console all reject them ("surrogates not allowed"). This
+# is the single choke point where EVERY exchange lands, so it is scrubbed
+# here — one garbled character must not kill a turn for any gateway.
+_SURROGATES = re.compile("[\ud800-\udfff]")
+
+
+def _clean_surrogates(text: str) -> str:
+    if not text:
+        return text
+    return _SURROGATES.sub("", text)
 
 DEFAULT_SOUL = """\
 You are Waku, a personal assistant running locally on your user's laptop.
@@ -100,6 +114,8 @@ class Session:
         if tool_calls:
             summary = "; ".join(f"{c['tool']}({c['args']}) -> {c['output']}" for c in tool_calls)
             record = f"{reply}\n[tools used: {summary}]"
+        user_message = _clean_surrogates(user_message)
+        record = _clean_surrogates(record)
         self.history.append({"role": "user", "content": user_message})
         self.history.append({"role": "assistant", "content": record})
         if self.memory is not None:

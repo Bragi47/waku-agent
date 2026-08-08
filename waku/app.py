@@ -6,6 +6,8 @@ session → loop. If you want to understand the repo in one place, start here.
 
 from __future__ import annotations
 
+import re
+
 from waku.config import Settings, load_settings
 from waku.db import connect
 from waku.loop.agent import LoopResult, Observer, run_loop
@@ -13,6 +15,19 @@ from waku.loop.models import get_client
 from waku.ops.tracing import Tracer, compose
 from waku.runtime.session import Session
 from waku.tools import build_registry
+
+# Whisper and some provider echoes can carry lone surrogates (U+D800–U+DFFF),
+# which httpx/sqlite/console reject with "surrogates not allowed" — exactly the
+# silent voice-reply killer seen live. respond() is the choke point every
+# gateway passes through; scrub the message before it enters the loop and the
+# reply before it comes out. Kept in sync with runtime/session.py's scrubber.
+_SURROGATES = re.compile("[\ud800-\udfff]")
+
+
+def _clean_surrogates(text: str) -> str:
+    if not text:
+        return text
+    return _SURROGATES.sub("", text)
 
 
 class Waku:
@@ -50,6 +65,7 @@ class Waku:
         # them with the turn (the reopened-thread telemetry the dashboard shows)
         import time
         captured: dict = {}
+        user_message = _clean_surrogates(user_message)
 
         def _capture(kind, ev):
             if kind == "gate":
@@ -109,6 +125,7 @@ class Waku:
                 self.memory.export_markdown()   # keep MEMORY.md in sync
 
         self.tracer.end_turn(result.reply, result.iterations)
+        result.reply = _clean_surrogates(result.reply)
         return result
 
     def _run_full_turn(self, user_message: str, notify, stream: bool) -> LoopResult:

@@ -54,6 +54,16 @@ def _speakable(text: str) -> str:
     return text.strip()
 
 
+def _clean_surrogates(text: str) -> str:
+    """Drop lone surrogates (U+D800–U+DFFF). Whisper can emit them on a
+    mis-decoded OGG, and they break EVERY downstream step — httpx body
+    encoding ('surrogates not allowed'), sqlite binding, TTS — silently
+    killing a voice reply. Stripped at the gateway boundary."""
+    if not text:
+        return text
+    return re.sub("[\ud800-\udfff]", "", text)
+
+
 _whisper = None
 _whisper_lock = None
 _pipeline = None
@@ -213,9 +223,13 @@ def _build_app(token: str, allowed: str = ""):
             await update.message.reply_text("This Waku serves someone else. Run your own!")
             return
         print(f"you › {update.message.text}")
-        result = waku.respond(update.message.text, observer=_observer, source="telegram")
-        print(f"waku › {result.reply}")
-        await update.message.reply_text(result.reply or "(no reply)")
+        # respond() is seconds of LLM time — run it off the event loop or the
+        # poller freezes with us and every incoming message queues behind us.
+        result = await asyncio.to_thread(waku.respond, update.message.text,
+                                         observer=_observer, source="telegram")
+        reply = _clean_surrogates(result.reply)
+        print(f"waku › {reply}")
+        await update.message.reply_text(reply or "(no reply)")
 
     async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if allowed_ids and str(update.effective_user.id) not in allowed_ids:
@@ -235,13 +249,16 @@ def _build_app(token: str, allowed: str = ""):
             data = await tg_file.download_as_bytearray()
             print(f"you › [voice {len(data)//1024} KiB]")
             heard = await asyncio.to_thread(_transcribe, bytes(data))
+            heard = _clean_surrogates(heard)
             if not heard:
                 await update.message.reply_text("(didn't catch that — try again?)")
                 return
             print(f"you › {heard}")
-            result = waku.respond(heard, observer=_observer, source="telegram")
-            print(f"waku › {result.reply}")
-            text = result.reply or "(no reply)"
+            result = await asyncio.to_thread(waku.respond, heard,
+                                             observer=_observer, source="telegram")
+            text = _clean_surrogates(result.reply)
+            print(f"waku › {text}")
+            text = text or "(no reply)"
             await update.message.reply_text(text)
             # Voice back to them if the neural voice is installed — optional, so a
             # telegram-only install (no torch) still works as plain text.
