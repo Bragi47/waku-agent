@@ -17,6 +17,12 @@ if not exist "%VENV%" (
 rem --- telegram replies with synthesized voice ---
 set "WAKU_TG_VOICE=1"
 
+rem --- UTF-8 console + Python UTF-8 mode.
+rem Fixes the Windows/cp1251 strftime bug (Russian locale day names decode
+rem to lone surrogates), keeps prints Cyrillic-safe end to end.
+chcp 65001 >nul
+set "PYTHONUTF8=1"
+
 title Waku — dashboard + telegram + voice
 echo.
 echo  Waku starting...

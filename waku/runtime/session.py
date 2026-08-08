@@ -80,8 +80,21 @@ class Session:
         # The agent runs on your laptop, so it should know your laptop's clock.
         # Local time WITH the timezone name — enough to resolve "in 30 minutes".
         now = datetime.now().astimezone()
+        # NO strftime weekdays/timezone names here: on Windows with a cp1251
+        # locale, datetime.strftime('%A') decodes the day name through the
+        # narrow codepage and yields LONE SURROGATES ('суббота' → surrogates),
+        # which then break sqlite/httpx downstream ("surrogates not allowed").
+        # Weekday table + manual UTC offset keep this ASCII-pure.
+        weekday = ("Monday", "Tuesday", "Wednesday", "Thursday",
+                   "Friday", "Saturday", "Sunday")[now.weekday()]
+        off = now.utcoffset()
+        total_min = int(off.total_seconds() // 60) if off else 0
+        sign = "+" if total_min >= 0 else "-"
+        total_min = abs(total_min)
+        offset = f"{sign}{total_min // 60:02d}:{total_min % 60:02d}"
+        clock = f"{weekday}, {now:%Y-%m-%d %H:%M} (UTC{offset})"
         parts = [load_soul(self.settings),
-                 f"\nRight now it is {now:%A, %Y-%m-%d %H:%M} ({now:%Z}, UTC{now:%z}).",
+                 f"\nRight now it is {clock}.",
                  # the agent should know its own brain — "what model are you?"
                  # is the first question every curious user asks
                  (f"Your model: you are running on '{self.settings.model}' via the "
