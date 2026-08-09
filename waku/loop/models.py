@@ -22,6 +22,8 @@ import os
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+from openai import APIConnectionError, APITimeoutError
+
 from waku.config import Settings
 
 
@@ -214,22 +216,31 @@ class OpenAICompatClient:
             ]
         return kwargs
 
+    _TRANSIENT = (APITimeoutError, APIConnectionError)
+
     def _call(self, kwargs: dict, **extra):
         """Run chat.completions.create with the max_tokens key-name fallback
         (older OpenAI-compatible endpoints only know max_tokens, not the newer
-        max_completion_tokens). Only retry when the error is ABOUT that param —
-        retrying on any error masked the real failure (e.g. a gpt-5.x call would
-        fail for some other reason, then the max_tokens retry buried it under a
-        confusing 'use max_completion_tokens' message)."""
-        try:
-            return self._client.chat.completions.create(**kwargs, **extra)
-        except Exception as exc:
-            m = str(exc).lower()
-            if "max_completion_tokens" not in m and "max_tokens" not in m:
-                raise
-            k = dict(kwargs)
-            k["max_tokens"] = k.pop("max_completion_tokens", None)
-            return self._client.chat.completions.create(**k, **extra)
+        max_completion_tokens) and exactly ONE transparent retry when the
+        transport itself hiccups — read timeouts and connection drops are the
+        norm on slow free tiers and flaky home links, and a single retry is
+        cheap. Retrying on any other error masked real failures before (a
+        gpt-5.x call would fail for some other reason, then the max_tokens
+        retry buried it under a confusing 'use max_completion_tokens' message),
+        so everything else re-raises as-is."""
+        for attempt in (1, 2):
+            try:
+                return self._client.chat.completions.create(**kwargs, **extra)
+            except self._TRANSIENT:
+                if attempt == 2:
+                    raise
+            except Exception as exc:
+                m = str(exc).lower()
+                if "max_completion_tokens" not in m and "max_tokens" not in m:
+                    raise
+                k = dict(kwargs)
+                k["max_tokens"] = k.pop("max_completion_tokens", None)
+                return self._client.chat.completions.create(**k, **extra)
 
     def _create(self, *, model, messages, max_tokens, system=None, tools=None):
         response = self._call(self._to_openai(

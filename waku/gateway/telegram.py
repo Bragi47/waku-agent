@@ -263,7 +263,10 @@ def _build_app(token: str, allowed: str = ""):
             traceback.print_exc()
             print(f"(telegram) text handling failed: {exc}")
             try:
-                await update.message.reply_text("(processing failed — try again?)")
+                # say WHAT failed, not just "try again" — half the time it is
+                # the LLM endpoint timing out, and the user deserves the truth
+                await update.message.reply_text(
+                    f"(processing failed: {type(exc).__name__}) - try again?")
             except Exception:
                 pass
 
@@ -313,7 +316,8 @@ def _build_app(token: str, allowed: str = ""):
             traceback.print_exc()
             print(f"(telegram) voice handling failed: {exc}")
             try:
-                await update.message.reply_text("(voice processing failed — try again?)")
+                await update.message.reply_text(
+                    f"(voice processing failed: {type(exc).__name__}) - try again?")
             except Exception:
                 pass
 
