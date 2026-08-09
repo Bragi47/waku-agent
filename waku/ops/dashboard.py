@@ -902,7 +902,12 @@ class Handler(BaseHTTPRequestHandler):
         if no_cache:
             self.send_header("Cache-Control", "no-cache, must-revalidate")
         self.end_headers()
-        self.wfile.write(body)
+        # A tab closing mid-response throws here; that's a normal user action,
+        # not an error worth a traceback in the terminal.
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            pass
 
     def do_GET(self):
         if self.path == "/api/data":
