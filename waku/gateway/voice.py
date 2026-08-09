@@ -33,10 +33,19 @@ MIC_RATE = int(os.getenv("WAKU_MIC_RATE", str(SAMPLE_RATE)))  # some mics only o
 
 def _mic_stream(**kw):
     """One input stream, honoring WAKU_MIC_DEVICE/WAKU_MIC_RATE — on Windows the
-    default device is often broken or locked, and many mics refuse 16k outright."""
+    default device is often broken or locked, and many mics refuse 16k outright.
+    If the configured device is busy (a second Waku instance holds it), retry
+    once on the system default instead of dying with PortAudioError."""
     import sounddevice as sd
 
-    return sd.InputStream(device=MIC_DEVICE, samplerate=MIC_RATE, channels=1, dtype="float32", **kw)
+    try:
+        return sd.InputStream(device=MIC_DEVICE, samplerate=MIC_RATE, channels=1, dtype="float32", **kw)
+    except sd.PortAudioError:
+        if MIC_DEVICE is None:
+            raise
+        print(f"(voice) mic device {MIC_DEVICE} unavailable - falling back to the default input "
+              "(a second Waku window may be holding the mic; close it and restart)")
+        return sd.InputStream(device=None, samplerate=MIC_RATE, channels=1, dtype="float32", **kw)
 
 
 class _AsyncMic:
