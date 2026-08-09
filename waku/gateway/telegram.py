@@ -98,14 +98,23 @@ def _get_whisper():
 
 def _transcribe(data: bytes) -> str:
     """Whisper an OGG voice note. The note is binary (opus in ogg), so write it
-    to a temp file and let faster-whisper's decoder (libav) handle it."""
+    to a temp file and let faster-whisper's decoder (libav) handle it. A note
+    Whisper cannot decode for any reason (a rare IndexError inside the decoder
+    loop, EOFError on a truncated upload, ...) must come back as empty text —
+    the caller then says "(didn't catch that)" instead of killing the turn."""
     fd, path = tempfile.mkstemp(suffix=".ogg")
     os.close(fd)
     with open(path, "wb") as fh:
         fh.write(data)
     try:
         segments, _ = _get_whisper().transcribe(path, language=os.getenv("WAKU_WHISPER_LANG"))
-        return " ".join(seg.text.strip() for seg in segments).strip()
+        parts = []
+        for seg in segments:
+            parts.append(seg.text.strip())
+        return " ".join(parts).strip()
+    except Exception as exc:  # BLE001: one bad note must never break voice replies
+        print(f"(telegram) whisper could not decode this note: {exc}")
+        return ""
     finally:
         try:
             os.unlink(path)
@@ -300,16 +309,20 @@ def _build_app(token: str, allowed: str = ""):
             print(f"waku › {text}")
             text = text or "(no reply)"
             await update.message.reply_text(text)
-            # Voice back to them if the neural voice is installed — optional, so a
-            # telegram-only install (no torch) still works as plain text.
+            # The synthesized voice reply is a POSITIVE, not a contract: the
+            # text answer is already delivered, so a TTS hiccup must not send
+            # a second, misleading "(voice processing failed)" on top of it.
             try:
                 import kokoro  # noqa: F401
             except ImportError:
                 return
             if os.getenv("WAKU_TG_VOICE", "0") != "1":
                 return
-            wav = await asyncio.to_thread(_speech_wav, _speakable(text))
-            await update.message.reply_voice(io.BytesIO(wav))
+            try:
+                wav = await asyncio.to_thread(_speech_wav, _speakable(text))
+                await update.message.reply_voice(io.BytesIO(wav))
+            except Exception as exc:  # BLE001: best-effort polish, never fatal
+                print(f"(telegram) voice reply skipped (text already delivered): {exc}")
         except Exception as exc:  # BLE001: a voice hiccup must never kill the bot
             import traceback
 
