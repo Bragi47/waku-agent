@@ -17,6 +17,7 @@ no server. This is why hobbyist assistants pick Telegram over WhatsApp
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import tempfile
@@ -241,10 +242,14 @@ def _build_app(token: str, allowed: str = ""):
             return
         try:
             # 'typing…' shows instantly so a multi-second LLM turn doesn't look
-            # like a dead bot (free tiers can take a minute per call).
+            # like a dead bot (free tiers can take a minute per call). It is
+            # best-effort — a blocked link must not kill the turn.
             from telegram.constants import ChatAction
 
-            await update.message.chat.send_action(ChatAction.TYPING)
+            try:
+                await update.message.chat.send_action(ChatAction.TYPING)
+            except Exception:
+                pass
             print(f"you › {update.message.text}")
             # respond() is seconds of LLM time — run it off the event loop or the
             # poller freezes with us and every incoming message queues behind us.
@@ -267,7 +272,6 @@ def _build_app(token: str, allowed: str = ""):
             await update.message.reply_text("This Waku serves someone else. Run your own!")
             return
         try:
-            import asyncio
             import io
 
             note = update.message.voice or getattr(update.message, "audio", None)
@@ -275,7 +279,10 @@ def _build_app(token: str, allowed: str = ""):
                 return
             from telegram.constants import ChatAction
 
-            await update.message.chat.send_action(ChatAction.TYPING)
+            try:
+                await update.message.chat.send_action(ChatAction.TYPING)
+            except Exception:
+                pass
             tg_file = await note.get_file()
             data = await tg_file.download_as_bytearray()
             print(f"you › [voice {len(data)//1024} KiB]")
@@ -383,17 +390,32 @@ def start_in_background() -> bool:
         logging.getLogger("telegram").setLevel(logging.WARNING)
         logging.getLogger("httpx").setLevel(logging.WARNING)
         # its own event loop on this thread; start_polling is non-blocking, then
-        # run_forever keeps it alive until the process (a daemon thread) exits.
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
+        # run_forever keeps it alive until the process exits. A transient network
+        # blip (Windows SSL flakiness: DECRYPTION_FAILED_OR_BAD_RECORD_MAC)
+        # must pause the poller, not kill it — so retry forever with a backoff,
+        # and say each distinct failure once instead of spamming the terminal.
+        backoff = 5
+        seen = set()
+
+        while True:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             app = _build_app(token)
-            loop.run_until_complete(app.initialize())
-            loop.run_until_complete(app.start())
-            loop.run_until_complete(app.updater.start_polling(error_callback=on_poll_error))
-            loop.run_forever()
-        except Exception as exc:
-            print(f"(telegram) background poller stopped: {exc}")
+            try:
+                loop.run_until_complete(app.initialize())
+                loop.run_until_complete(app.start())
+                loop.run_until_complete(app.updater.start_polling(error_callback=on_poll_error))
+                loop.run_forever()
+                break
+            except KeyboardInterrupt:
+                break
+            except Exception as exc:  # BLE001: the poller retries, never dies silently
+                msg = str(exc) or type(exc).__name__
+                if msg not in seen:
+                    seen.add(msg)
+                    print(f"(telegram) |poller pause| {msg} — retrying in {backoff}s")
+                threading.Event().wait(backoff)
+                backoff = min(backoff * 2, 60)
 
     threading.Thread(target=run, daemon=True, name="telegram-poll").start()
     return True
